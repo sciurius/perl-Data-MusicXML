@@ -1,0 +1,16 @@
+Data-MusicXML
+
+This is an experimental framework for parsing MusicXML files.
+
+If you are in this sort of business, this may contain interesting
+information.
+
+No ready to use tools and modules yet.
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2016 Johan Vromans
+
+This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
+
