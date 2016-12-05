@@ -1,11 +1,15 @@
 Revision history for Data-MusicXML
 
+0.03    2016-12-04
+
+	Actualize parse script.
+
 0.02    2016-12-04
 
         Reworked from XML::Simple to XML::LibXML.
 	Proof-of-concept 'Yellow Dog Blues' works.
 
-0.01    2016-12-02
+0.01    2016-12-01
 
 	First version, not released on an unsuspecting world.
 

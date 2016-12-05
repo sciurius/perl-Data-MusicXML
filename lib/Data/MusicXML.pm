@@ -16,19 +16,14 @@ Data::MusicXML - Framework for parsing MusicXML
 
 =cut
 
-our $VERSION = '0.01';
-
+our $VERSION = '0.03';
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
-
-Perhaps a little code snippet.
-
     use Data::MusicXML;
 
-    my $foo = Data::MusicXML->new();
-    ...
+    my $p = Data::MusicXML->new();
+    $p->processfile('Yellow_Dog_Blues.xml');
 
 =cut
 
@@ -46,8 +41,10 @@ sub new {
 
 sub processfiles {
     my ( $self, @files ) = @_;
+    $self->{songix} = 0;
     foreach ( @files ) {
 	$self->processfile($_);
+	$self->{songix}++;
     }
 }
 
@@ -55,7 +52,7 @@ sub processfiles {
 sub _process {
     my ( $self, $data, $key, $handler, $ctx ) = @_;
 
-    my @nodes = $data->findnodes( "./$key" );
+    my @nodes = $data->fn($key);
     warn("No $key nodes found\n"), return unless @nodes;
 
     my $ix = 0;
@@ -77,7 +74,7 @@ sub processfile {
 
     croak( decode_utf8($file) . ": $!" ) unless -r $file;
     my $parser = XML::LibXML->new;
-#    $parser->load_catalog( $self->{catalog} );
+    $parser->load_catalog( $self->{catalog} );
     $parser->set_options( { no_cdata => 1 } );
     my $data = $parser->parse_file($file);
 
@@ -104,22 +101,44 @@ sub processfile {
     # print DDumper($data);
 
     my $root = "/score-partwise";
+    my $rootnode = $data->findnodes($root)->[0];
 
-    if ( my $d = $data->findnodes( "$root/identification/encoding/software" ) ) {
-	$self->{kludge} = 'irealpro'
-	  if $d->[0]->to_literal =~ /^iReal Pro/;
+    my $song = { title => 'NoName',
+		 composer => 'NoBody',
+		 key => 'C',
+		 tempo => 100,
+		 index => $self->{songix},
+		 parts => [] };
+
+    if ( my $d = $rootnode->fn1('movement-title') ) {
+	$song->{title} = $song->{'movement-title'} = $d->to_literal;
+	warn( "Title: ", decode_utf8($song->{title}), "\n" )
+	  if $self->{debug};
+    }
+    if ( my $d = $rootnode->fn1('work/work-title') ) {
+	$song->{title} = $song->{'work-title'} = $d->to_literal;
+	warn( "Title: ", decode_utf8($song->{title}), "\n" )
+	  if $self->{debug};
     }
 
-    if ( my $d = $data->findnodes( "$root/movement-title" ) ) {
-	printf STDERR ( "Title: %s\n",
-			decode_utf8($d->[0]->to_literal) );
+    if ( my $d = $rootnode->fn1('identification/creator[@type=\'composer\']') ) {
+	$song->{composer} = $d->to_literal;
+	warn( "Composer: ", decode_utf8($song->{composer}), "\n" )
+	  if $self->{debug};
     }
-    if ( my $d = $data->findnodes( "$root/work/work-title" ) ) {
-	printf STDERR ( "Title: %s\n",
-			decode_utf8($d->[0]->to_literal) );
-    }
-    $self->_process( $data->findnodes($root)->[0], "part", \&process_part,
+
+    $self->{song} = $song;
+
+    $self->_process( $rootnode, "part", \&process_part,
 		     { path => $root } );
+
+    DDumper($song);
+
+    use Data::MusicXML::iRealPro;
+    for ( my $ix = 0; $ix < @{ $song->{parts} }; $ix++ ) {
+	Data::MusicXML::iRealPro->to_irealpro( $song, $ix );
+    }
+
 }
 
 sub process_part {
@@ -129,22 +148,18 @@ sub process_part {
     #   <measure ... />
     # </part>
 
-    warn( "Part $part: ",
-	  decode_utf8( $data->fn('@id')->[0]->to_literal ), "\n");
+    my $this = {};
+    push( @{ $self->{song}->{parts} }, $this );
+
+    $this->{id} = $data->fn1('@id')->to_literal;
+    warn( "Part $part: ", decode_utf8($this->{id}), "\n")
+      if $self->{debug};
 
     # print DDumper($data);
 
-    $self->{irp} = "";
+    $this->{sections} = [];
     $self->_process( $data, "measure", \&process_measure, $ctx );
 
-    $self->{irp} .= " Z ";
-    $self->{irp} =~ s/([[:alnum:]]+)\s+([[:alnum:]])/$1, $2/g;
-    warn( "===IRP===\n");
-    print(
-	  "Song: Dummy (Testing)\n",
-	  "Style: Medium Swing (Jazz-Even 8ths); key: G-; tempo: 138; repeat: 3\n",
-	  "\n",
-	  $self->{irp}, "\n" );
 }
 
 sub process_measure {
@@ -159,19 +174,28 @@ sub process_measure {
 
     use Data::MusicXML::Data qw( @clefs );
 
-    $self->{irp} .= " |";
+    my $this = $self->{song}->{parts}->[-1];
+
+    use feature qw(state);
+    state $lastchord;
+
     my $mark = "";
-    foreach ( @{ $data->findnodes("./direction/direction-type/rehearsal") } ) {
+    foreach ( @{ $data->fn('direction/direction-type/rehearsal') } ) {
 	$mark = $_->to_literal;
-	chop($self->{irp});
-	chop($self->{irp});
-	$self->{irp} =~ s;\|$;\];;
-	$self->{irp} .= "[*" . $mark;
     }
+
+    if ( $mark ) {
+	push( @{ $this->{sections} },
+	      { mark => $mark, measures => [] } );
+    }
+    elsif ( @{ $this->{sections} } == 0 ) {
+	$this->{sections} = [ { measures => [] } ];
+    }
+    $this = $this->{sections}->[-1];
 
     my $clef = "";
     my $mode = "major";
-    foreach ( @{ $data->findnodes("./attributes/key/*") } ) {
+    foreach ( @{ $data->fn('attributes/key/*') } ) {
 	if ( $_->nodeName eq "fifths" ) {
 	    $clef = $clefs[$_->to_literal];
 	}
@@ -182,16 +206,22 @@ sub process_measure {
 
     printf STDERR ( "Measure %2d: \"%s\" %s%s %s\n",
 		    $measure,
-		    $data->fn('@number')->[0]->to_literal,
+		    $data->fn1('@number')->to_literal,
 		    $mark ? "[$mark] " : "",
 		    $clef ? ( $clef, $mode ) : ( "", "" ),
-		  );
+		  )
+      if $self->{debug};
+
+    $clef .= "-" if $mode eq 'minor';
+    $self->{song}->{key} ||= $clef;
+
     # warn DDumper($data);
 
-    if ( my $d = $data->fn('sound/tempo') ) {
-	$ctx->{tempo} = $d->[0]->to_literal;
+    if ( my $d = $data->fn1('sound/tempo') ) {
+	$ctx->{tempo} = $d->to_literal;
 	$ctx->{_parent}->{tempo} = $ctx->{tempo};
-	print STDERR ( " Tempo: ", $ctx->{tempo}, "\n" );
+	print STDERR ( " Tempo: ", $ctx->{tempo}, "\n" )
+	  if $self->{debug};
     }
     else {
 	$ctx->{tempo} = $ctx->{_parent}->{tempo};
@@ -206,22 +236,23 @@ sub process_measure {
 	}
 	print STDERR ( " Beats: ",
 		       $ctx->{beats}, "/", $ctx->{'beat_type'},
-		       "\n" );
-	$self->{irp} .= " T" . $ctx->{beats} . $ctx->{'beat_type'},
+		       "\n" ) if $self->{debug};
+	$this->{time} = $ctx->{beats} ."/". $ctx->{'beat_type'};
     }
     else {
 	$ctx->{beats} = $ctx->{_parent}->{beats};
 	$ctx->{'beat_type'} = $ctx->{_parent}->{'beat_type'};
     }
 
-    if ( my $d = $data->fn('attributes/staves') ) {
-	$ctx->{staves} = $d->[0]->to_literal;
+    if ( my $d = $data->fn1('attributes/staves') ) {
+	$ctx->{staves} = $d->to_literal;
     }
 
-    if ( my $d = $data->fn('attributes/divisions') ) {
+    if ( my $d = $data->fn1('attributes/divisions') ) {
 	$ctx->{_parent}->{divisions} =
-	$ctx->{divisions} = $d->[0]->to_literal;
-	print STDERR ( " Divisions: ", $ctx->{divisions}, "\n" );
+	$ctx->{divisions} = $d->to_literal;
+	print STDERR ( " Divisions: ", $ctx->{divisions}, "\n" )
+	  if $self->{debug};
     }
     else {
 	$ctx->{divisions} = $ctx->{_parent}->{divisions};
@@ -232,7 +263,8 @@ sub process_measure {
     $ctx->{currentbeat} = 0;
     my @chords = ( "_" ) x $ctx->{beats};
     foreach ( @{ $data->fn('note | ./harmony') } ) {
-	print STDERR ("== beat: ", $ctx->{currentbeat}, "\n" );
+	print STDERR ("== beat: ", $ctx->{currentbeat}, "\n" )
+	  if $self->{debug};
 	$self->process_note( ++$n, $_, $ctx )
 	  if $_->nodeName eq "note";
 	if ( $_->nodeName eq "harmony" ) {
@@ -240,7 +272,16 @@ sub process_measure {
 	      $self->process_harmony( ++$h, $_, $ctx );
 	}
     }
-    $self->{irp} .= " @chords";
+
+    if ( $chords[0] eq "_" && $lastchord ) {
+	$chords[0] = $lastchord;
+    }
+    push( @{ $this->{measures} },
+	  { number => $data->fn1('@number')->to_literal,
+	    chords => [ @chords ] } );
+
+    pop(@chords) while @chords && $chords[-1] eq "_";
+    $lastchord = $chords[-1] if @chords;
 }
 
 sub process_note {
@@ -256,17 +297,17 @@ sub process_note {
 
     my $root;
 
-    if ( my $d = $data->fn('pitch') ) {
-	$root = $d->[0]->fn('step')->[0]->to_literal;
-	foreach ( @{ $d->[0]->fn('alter') } ) {
+    if ( my $d = $data->fn1('pitch') ) {
+	$root = $d->fn('step')->[0]->to_literal;
+	foreach ( @{ $d->fn('alter') } ) {
 	    $root .= 'b' if $_->to_literal < 0;
 	    $root .= '#' if $_->to_literal > 0;
 	}
-	if ( my $d = $d->[0]->fn('octave') ) {
-	    $root .= $d->[0]->to_literal;
+	if ( my $d = $d->fn1('octave') ) {
+	    $root .= $d->to_literal;
 	}
     }
-    elsif ( $data->fn('rest') ) {
+    elsif ( $data->fn1('rest') ) {
 	$root = 'rest';
     }
 
@@ -274,13 +315,14 @@ sub process_note {
 		   $note,
 		   $root,
 		   $data->fn('type')->[0]->to_literal,
-		   eval { $data->fn('default-x')->[0]->to_literal } || 0,
+		   eval { $data->fn1('default-x')->to_literal } || 0,
 		   $duration,
-		   eval { $data->fn('staff')->[0]->to_literal } || 1,
-		   );
+		   eval { $data->fn1('staff')->to_literal } || 1,
+		  )
+      if $self->{debug};
 
     $ctx->{currentbeat} += $duration
-      unless $data->fn('chord');
+      unless $data->fn1('chord');
 }
 
 sub process_harmony {
@@ -288,32 +330,46 @@ sub process_harmony {
 
 #    warn DDumper($data);
 
-    my $root = $data->fn('root/root-step')->[0]->to_literal;
+    my $root = $data->fn1('root/root-step')->to_literal;
     foreach ( @{ $data->fn('root/root-alter') } ) {
 	$root .= 'b' if $_->to_literal < 0;
 	$root .= '#' if $_->to_literal > 0;
     }
 
-    my $quality = "";
-    my $tquality = $data->fn('kind')->[0]->to_literal;
-    if ( my $d = $data->fn('kind/@text') ) {
-	$quality = $d->[0]->to_literal;
+    my $tquality = "";
+    my $quality = $data->fn1('kind')->to_literal;
+    if ( my $d = $data->fn1('kind/@text') ) {
+	$tquality = $d->to_literal;
     }
-    else {
-	$quality = $tquality unless $tquality eq 'major';
+
+    my @d;
+    foreach ( @{ $data->fn('degree') } ) {
+	push( @d, [ $_->fn1('degree-value')->to_literal,
+		    $_->fn1('degree-alter')->to_literal,
+		    $_->fn1('degree-type')->to_literal ] );
     }
 
     printf STDERR ( "Harm %3d: %s%s %s\n",
-		    $harmony, $root, $quality, $tquality );
+		    $harmony, $root, $quality, $tquality )
+      if $self->{debug};
 
-    $quality =~ s/dim/o/;
-    $quality =~ s/^m(?!a)/-/;
-    return $root . $quality;
+    return [ $root, $quality, $tquality, @d ? \@d : () ];
 
 }
 
+
+################ Convenience ################
+
+# Convenient short for subnodes. Returns a nodelist.
 sub XML::LibXML::Node::fn {
     $_[0]->findnodes( './' . $_[1] );
+}
+
+# Convenient short for single subnode. Returns a node.
+sub XML::LibXML::Node::fn1 {
+    my $nl = $_[0]->findnodes( './' . $_[1] . '[1]' );
+    return unless $nl;
+    $nl->[0];
 }
 
 =head1 AUTHOR
